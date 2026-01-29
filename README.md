@@ -2,7 +2,7 @@
 
 **Predictive Operations Platform for Bluebikes**
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 ---
 
@@ -62,7 +62,7 @@ BlueForecast combines real-time demand forecasting, automated drift detection, a
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+
 - pip
 - Docker (optional, for containerized deployment)
 
@@ -330,15 +330,6 @@ gcloud run deploy blueforecast \
 
 *Trip data provided by Bluebikes under the [Bluebikes Data License Agreement](https://www.bluebikes.com/data-license-agreement).*
 
----
-
-## Team
-
-- [Team Member 1]
-- [Team Member 2]
-- [Team Member 3]
-- [Team Member 4]
-- [Team Member 5]
 
 ---
 
