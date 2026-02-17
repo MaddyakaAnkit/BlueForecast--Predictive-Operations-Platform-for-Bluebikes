@@ -237,3 +237,6 @@ derby.log
 # Mac files
 .DS_Store
 **/.DS_Store
+logs/
+dags/_airflow_demo_gcs_sdk.py
+src/one_step_demo_gcs_sdk.py
