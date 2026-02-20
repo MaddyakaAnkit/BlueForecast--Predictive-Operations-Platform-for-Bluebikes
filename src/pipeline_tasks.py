@@ -1,7 +1,7 @@
 """
 BlueForecast Pipeline Tasks
-Stub functions for each stage of the data pipeline.
-Replace each stub with real logic from notebooks.
+Callable functions for each stage of the data pipeline.
+Each function delegates to its dedicated module.
 """
 
 import logging
@@ -20,55 +20,78 @@ def download_raw_data(**kwargs):
 
 
 def clean_data(**kwargs):
-    """Clean raw trip data — handle nulls, duplicates, type casting."""
+    """
+    Clean raw trip data — dedup, null removal, duration filter,
+    text standardization.
+    Reads:  gs://BUCKET/raw/historical/{year}/csv/*.csv
+    Writes: gs://BUCKET/processed/cleaned/year={year}/cleaned.parquet
+    """
     from src.data_processing.data_cleaning import clean_data as _clean
     return _clean(**kwargs)
 
 
 def process_station_metadata(**kwargs):
-    """Process and enrich station metadata."""
-    logger.info("STUB: process_station_metadata — writing to gs://%s/processed/stations/", BUCKET)
-    # TODO: Replace with logic from 02_station_metadata.ipynb
-    return "process_station_metadata complete"
+    """
+    Fetch current Bluebikes station info from GBFS API.
+    Writes: gs://BUCKET/metadata/stations/stations.parquet
+    """
+    from src.data_processing.station_metadata import process_station_metadata as _run
+    return _run(**kwargs)
 
 
 def process_weather_data(**kwargs):
-    """Fetch and process weather data for feature enrichment."""
-    logger.info("STUB: process_weather_data — writing to gs://%s/processed/weather/", BUCKET)
-    # TODO: Replace with logic from 03_weather_data.ipynb
-    return "process_weather_data complete"
+    """
+    Fetch historical hourly weather for Boston from Open-Meteo API.
+    Writes: gs://BUCKET/data/weather/weather_hourly_2023_2024.parquet
+    """
+    from src.data_processing.weather_data import process_weather_data as _run
+    return _run(**kwargs)
 
 
 def process_holiday_calendar(**kwargs):
-    """Generate holiday calendar features."""
-    logger.info("STUB: process_holiday_calendar — writing to gs://%s/processed/holidays/", BUCKET)
-    # TODO: Replace with logic from 04_holiday_calendar.ipynb
-    return "process_holiday_calendar complete"
+    """
+    Generate US Federal Holiday calendar for 2023-2024, including
+    Patriots Day (MA-specific). 24 holidays total.
+    Writes: gs://BUCKET/data/contextual/us_holidays_2023_2024.parquet
+    """
+    from src.data_processing.holiday_calendar import process_holiday_calendar as _run
+    return _run(**kwargs)
 
 
 def aggregate_demand(**kwargs):
-    """Aggregate hourly demand joining trips, stations, weather, holidays."""
-    logger.info("STUB: aggregate_demand — writing to gs://%s/processed/demand/", BUCKET)
-    # TODO: Replace with logic from 05_aggregate_demand.ipynb
-    return "aggregate_demand complete"
+    """
+    Convert 7.88M cleaned trips → hourly pickup counts per station.
+    Converts UTC → Eastern Time, builds complete 534-station × 15,384-hour
+    grid, fills zero-demand slots (68.6% sparsity).
+    Reads:  gs://BUCKET/processed/cleaned/year=*/cleaned.parquet
+    Writes: gs://BUCKET/processed/features/hourly_demand_by_station.parquet
+    """
+    from src.data_processing.aggregate_demand import aggregate_demand as _run
+    return _run(**kwargs)
 
 
 def run_feature_engineering(**kwargs):
-    """Generate final feature set for model training."""
-    logger.info("STUB: run_feature_engineering — writing to gs://%s/processed/features/", BUCKET)
-    # TODO: Replace with logic from 06_feature_engineering.ipynb
-    return "run_feature_engineering complete"
+    """
+    Join hourly demand with weather, station metadata, and holidays.
+    Adds lag features (1h, 24h, 168h), rolling averages (3h, 6h, 24h),
+    and cyclical time encodings. Output: 8.2M rows × 32 columns, zero nulls.
+    Reads:  gs://BUCKET/processed/features/hourly_demand_by_station.parquet
+            gs://BUCKET/data/weather/weather_hourly_2023_2024.parquet
+            gs://BUCKET/metadata/stations/stations.parquet
+            gs://BUCKET/data/contextual/us_holidays_2023_2024.parquet
+    Writes: gs://BUCKET/processed/features/feature_matrix.parquet
+    """
+    from src.data_processing.feature_engineering import feature_engineering as _run
+    return _run(**kwargs)
 
 
 def validate_schema(**kwargs):
-    """Validate data schema and statistics against baseline."""
-    logger.info("STUB: validate_schema — checking schema for gs://%s/processed/features/", BUCKET)
-    # TODO: Replace with Great Expectations or TFDV validation
-    return "validate_schema complete"
+    """Validate feature matrix schema, types, ranges, and quality constraints."""
+    from src.data_processing.schema_validation import validate_schema as _run
+    return _run(**kwargs)
 
 
 def detect_bias(**kwargs):
     """Run bias detection via data slicing on final dataset."""
-    logger.info("STUB: detect_bias — analyzing slices for gs://%s/processed/features/", BUCKET)
-    # TODO: Replace with bias detection logic (station location, time, season)
-    return "detect_bias complete"
+    from src.data_processing.bias_detection import detect_bias as _run
+    return _run(**kwargs)

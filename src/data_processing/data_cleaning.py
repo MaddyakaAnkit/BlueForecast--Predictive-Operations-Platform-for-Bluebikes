@@ -9,7 +9,9 @@ Based on analysis from 01_data_cleaning.ipynb:
 - Retention rate: ~99% (7.88M of 7.95M records kept)
 """
 
+import gc
 import io
+import zipfile
 import logging
 import pandas as pd
 from google.cloud import storage
@@ -28,10 +30,17 @@ EXPECTED_COLS = [
     "member_casual"
 ]
 
+# ── Fixed paths: raw/trips/{year}/ ──────────────────────────────────────────
 # 2023: only Apr-Dec (new format); 2024: all months
-RAW_FILES = {
-    "2023": [f"raw/historical/2023/csv/2023{m:02d}-bluebikes-tripdata.csv" for m in range(4, 13)],
-    "2024": [f"raw/historical/2024/csv/2024{m:02d}-bluebikes-tripdata.csv" for m in range(1, 13)],
+# Try CSV first (raw/trips/{year}/csv/), fall back to zip files
+RAW_CSV_FILES = {
+    "2023": [f"raw/trips/2023/csv/2023{m:02d}-bluebikes-tripdata.csv" for m in range(4, 13)],
+    "2024": [f"raw/trips/2024/csv/2024{m:02d}-bluebikes-tripdata.csv" for m in range(1, 13)],
+}
+
+RAW_ZIP_FILES = {
+    "2023": [f"raw/trips/2023/2023{m:02d}-bluebikes-tripdata.zip" for m in range(4, 13)],
+    "2024": [f"raw/trips/2024/2024{m:02d}-bluebikes-tripdata.zip" for m in range(1, 13)],
 }
 
 
@@ -40,12 +49,40 @@ def _download_csv(client, blob_path):
     bucket = client.bucket(BUCKET)
     blob = bucket.blob(blob_path)
     if not blob.exists():
-        logger.warning("File not found: %s — skipping", blob_path)
         return None
     data = blob.download_as_bytes()
     df = pd.read_csv(io.BytesIO(data), parse_dates=["started_at", "ended_at"])
-    logger.info("  Loaded %s: %d rows", blob_path.split("/")[-1], len(df))
+    logger.info("  Loaded CSV %s: %d rows", blob_path.split("/")[-1], len(df))
     return df
+
+
+def _download_zip(client, blob_path):
+    """Download a zip from GCS, extract the CSV inside, return as DataFrame."""
+    bucket = client.bucket(BUCKET)
+    blob = bucket.blob(blob_path)
+    if not blob.exists():
+        logger.warning("  Zip not found: %s — skipping", blob_path)
+        return None
+    data = blob.download_as_bytes()
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
+        if not csv_names:
+            logger.warning("  No CSV found inside %s — skipping", blob_path)
+            return None
+        # Use the first (usually only) CSV in the zip
+        with zf.open(csv_names[0]) as f:
+            df = pd.read_csv(f, parse_dates=["started_at", "ended_at"])
+    logger.info("  Loaded ZIP %s → %s: %d rows",
+                blob_path.split("/")[-1], csv_names[0], len(df))
+    return df
+
+
+def _load_raw_file(client, csv_path, zip_path):
+    """Try CSV first, fall back to zip."""
+    df = _download_csv(client, csv_path)
+    if df is not None:
+        return df
+    return _download_zip(client, zip_path)
 
 
 def _clean_dataframe(df, label="unknown"):
@@ -82,7 +119,7 @@ def _clean_dataframe(df, label="unknown"):
     # 6. Add derived time columns
     df["trip_duration_minutes"] = df["trip_duration_seconds"] / 60
     df["start_hour"] = df["started_at"].dt.hour
-    df["start_day_of_week"] = df["started_at"].dt.dayofweek + 1  # 1=Mon match Spark
+    df["start_day_of_week"] = df["started_at"].dt.dayofweek + 1  # 1=Mon
     df["start_month"] = df["started_at"].dt.month
     df["start_year"] = df["started_at"].dt.year
 
@@ -94,20 +131,31 @@ def _clean_dataframe(df, label="unknown"):
 
 def clean_data(**kwargs):
     """
-    Airflow-callable: download raw CSVs from GCS, clean, upload parquet back to GCS.
-    Reads from: gs://BUCKET/raw/historical/{year}/csv/*.csv
+    Airflow-callable: download raw CSVs (or zips) from GCS, clean,
+    upload parquet back to GCS.
+
+    Reads from: gs://BUCKET/raw/trips/{year}/csv/*.csv
+                  OR gs://BUCKET/raw/trips/{year}/*.zip (fallback)
     Writes to:  gs://BUCKET/processed/cleaned/year={year}/cleaned.parquet
     """
     client = storage.Client()
     bucket = client.bucket(BUCKET)
     total_rows = 0
 
-    for year, file_paths in RAW_FILES.items():
+    for year in ["2024"]:  # TODO: add "2023" back after pipeline validation
         logger.info("=== Processing year %s ===", year)
+        csv_paths = RAW_CSV_FILES[year]
+        zip_paths = RAW_ZIP_FILES[year]
         frames = []
-        for path in file_paths:
-            df = _download_csv(client, path)
+
+        for csv_path, zip_path in zip(csv_paths, zip_paths):
+            df = _load_raw_file(client, csv_path, zip_path)
             if df is not None:
+                # Validate schema — skip old-format files
+                if "ride_id" not in df.columns:
+                    logger.warning("  Skipping %s — old schema (no ride_id column)",
+                                   csv_path.split("/")[-1])
+                    continue
                 frames.append(df)
 
         if not frames:

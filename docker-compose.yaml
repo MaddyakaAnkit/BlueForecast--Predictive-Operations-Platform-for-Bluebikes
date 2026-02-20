@@ -36,7 +36,7 @@ services:
       - "8081:8080"
     command: >
       bash -lc "
-      pip install --no-cache-dir google-cloud-storage pandas pyarrow &&
+      pip install --no-cache-dir google-cloud-storage pandas pyarrow requests scipy &&
       airflow db migrate &&
       airflow users create --username admin --password admin --firstname admin --lastname admin --role Admin --email admin@example.com || true &&
       rm -f /opt/airflow/airflow-webserver.pid &&
@@ -63,7 +63,7 @@ services:
         - ./logs:/opt/airflow/logs
         - ~/.config/gcloud:/home/airflow/.config/gcloud:ro
       command: >
-        bash -c "pip install --no-cache-dir google-cloud-storage pandas pyarrow && airflow scheduler"
+        bash -c "pip install --no-cache-dir google-cloud-storage pandas pyarrow requests scipy && airflow scheduler"
 
 volumes:
   postgres-db:
