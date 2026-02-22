@@ -13,6 +13,7 @@ Based on analysis from 06_feature_engineering.ipynb:
 - Output: 8,215,056 rows × 32 columns, zero nulls
 """
 
+import gc
 import io
 import logging
 import numpy as np
@@ -154,6 +155,8 @@ def feature_engineering(**kwargs):
         "humidity_pct", "weather_code", "is_precipitation", "is_cold",
         "is_hot", "feels_like_c"
     ]].copy()
+    del weather
+    gc.collect()
 
     df = demand.merge(
         weather_features,
@@ -161,12 +164,21 @@ def feature_engineering(**kwargs):
         right_on="datetime",
         how="left"
     ).drop(columns=["datetime"])
-
+    del weather_features, demand
+    gc.collect()
+    
     weather_nulls = df["temperature_c"].isnull().sum()
     logger.info(
         "After weather join: %d rows | missing weather: %d (%.2f%%)",
         len(df), weather_nulls, weather_nulls / len(df) * 100
     )
+
+    # Forward-fill missing weather (small gaps at edges of date range)
+    weather_cols = ["temperature_c", "precipitation_mm", "wind_speed_kmh",
+                    "humidity_pct", "weather_code", "is_precipitation",
+                    "is_cold", "is_hot", "feels_like_c"]
+    df[weather_cols] = df[weather_cols].ffill().bfill()
+    logger.info("Weather nulls after fill: %d", df[weather_cols].isnull().sum().sum())
 
     # -----------------------------------------------------------------------
     # 3. Join station capacity
@@ -175,7 +187,7 @@ def feature_engineering(**kwargs):
     # -----------------------------------------------------------------------
     trips_sample = pd.concat([
         _load_parquet(client, f"processed/cleaned/year={y}/cleaned.parquet")
-        for y in [2024]
+        for y in [2023, 2024]
         if client.bucket(BUCKET).blob(
             f"processed/cleaned/year={y}/cleaned.parquet"
         ).exists()
@@ -183,6 +195,8 @@ def feature_engineering(**kwargs):
                             "start_lat", "start_lng"]]
 
     station_lookup = _build_station_lookup(trips_sample, stations)
+    del trips_sample, stations
+    gc.collect()
 
     df = df.merge(station_lookup, on="start_station_id", how="left")
 

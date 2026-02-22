@@ -45,17 +45,8 @@ def task_failure_alert(context):
     log_url = task.log_url
 
     alert_logger.critical(
-        "=" * 60 + "\n"
-        "🚨 PIPELINE ALERT: Task Failed\n"
-        "=" * 60 + "\n"
-        "  DAG:            %s\n"
-        "  Task:           %s\n"
-        "  Execution Date: %s\n"
-        "  Try Number:     %s\n"
-        "  Exception:      %s\n"
-        "  Log URL:        %s\n"
-        "=" * 60,
-        dag_id, task_id, execution_date, try_number, exception, log_url
+        "PIPELINE ALERT: Task '%s' failed on %s (attempt %s): %s | Log: %s",
+        task_id, execution_date, try_number, exception, log_url
     )
 
 

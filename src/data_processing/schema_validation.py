@@ -49,9 +49,9 @@ EXPECTED_SCHEMA = {
     "wind_speed_kmh": "float",
     "humidity_pct": "numeric",
     "weather_code": "numeric",
-    "is_precipitation": "int",
-    "is_cold": "int",
-    "is_hot": "int",
+    "is_precipitation": "numeric",
+    "is_cold": "numeric",
+    "is_hot": "numeric",
     "feels_like_c": "float",
     # Station metadata
     "capacity": "int",

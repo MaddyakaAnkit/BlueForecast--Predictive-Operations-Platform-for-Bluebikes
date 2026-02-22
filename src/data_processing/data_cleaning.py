@@ -142,7 +142,7 @@ def clean_data(**kwargs):
     bucket = client.bucket(BUCKET)
     total_rows = 0
 
-    for year in ["2024"]:  # TODO: add "2023" back after pipeline validation
+    for year in ["2023", "2024"]:
         logger.info("=== Processing year %s ===", year)
         csv_paths = RAW_CSV_FILES[year]
         zip_paths = RAW_ZIP_FILES[year]

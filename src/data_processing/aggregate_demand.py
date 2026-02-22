@@ -58,7 +58,7 @@ def aggregate_demand(**kwargs):
 
     # --- 1. Load cleaned data for both years ---
     frames = []
-    for year in [2024]:
+    for year in [2023, 2024]:
         df = _load_cleaned_year(client, year)
         if df is not None:
             frames.append(df)
