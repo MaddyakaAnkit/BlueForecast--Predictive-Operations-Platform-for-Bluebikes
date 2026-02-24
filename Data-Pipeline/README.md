@@ -205,7 +205,9 @@ Data slicing across 6 dimensions with disparity ratios:
 
 ---
 
-## Bias Mitigation
+##Bias Mitigation
+
+Bias detection implemented using custom data slicing analysis (similar approach to SliceFinder/TFMA) tailored to bikeshare demand data. Demographic features (age, gender) are not available in BlueBikes trip data, so operational dimensions (station capacity, time of day, weather, season) serve as the relevant subgroups for fairness analysis.
 
 ### Detected Biases
 1. **Station capacity disparity (10.21x)** — High-capacity stations get 10x more demand than low-capacity
