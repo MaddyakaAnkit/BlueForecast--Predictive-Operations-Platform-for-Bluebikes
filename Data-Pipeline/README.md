@@ -35,9 +35,10 @@ download_raw_data
 ```bash
 git clone https://github.com/tengli-alaska/BlueForecast--Predictive-Operations-Platform-for-Bluebikes.git
 cd BlueForecast--Predictive-Operations-Platform-for-Bluebikes/Data-Pipeline
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+cd Data-Pipeline
+pip3 install -r requirements.txt
 ```
 
 ### 2. Configure GCP credentials
@@ -45,6 +46,14 @@ pip install -r requirements.txt
 ```bash
 gcloud auth application-default login
 ```
+Note:
+for this Project owner must grant access first:
+gcloud projects add-iam-policy-binding bluebikes-demand-predictor \
+  --member="user:teammate-email@northeastern.edu" \
+  --role="roles/storage.objectViewer"
+
+Then on your machine:
+gcloud auth application-default login
 
 ### 3. Start Airflow
 
@@ -58,7 +67,7 @@ docker compose up -d
 
 In the Airflow UI → find `bluebikes_data_pipeline` → click **Trigger DAG**.
 
-Full run takes ~20–25 minutes (both years).
+Full run takes ~15 minutes (both years).
 
 ### 5. Run tests
 
@@ -97,7 +106,7 @@ Data-Pipeline/
 ├── tests/
 │   ├── conftest.py
 │   └── test_pipeline.py               # 35 unit tests
-├── data/
+├── data/                               # Populated by DVC pull or 
 │   ├── raw/
 │   └── processed/
 ├── logs/                               # Airflow logs (auto-generated)
@@ -298,11 +307,11 @@ dvc remote list
 
 ---
 
-## Reproducibility
+## Reproducibility - steps in detailed mentioned above
 
 1. Clone repo → `cd Data-Pipeline`
-2. `pip install -r requirements.txt`
-3. `gcloud auth application-default login`
+2. `pip3 install -r requirements.txt in venv`
+3. `gcloud auth application-default login with access`
 4. `docker compose up -d`
 5. Trigger DAG in Airflow UI (http://localhost:8081)
 6. Verify: `pytest tests/test_pipeline.py -v` (35 passed)
