@@ -1,0 +1,7 @@
+frozen: true
+deps:
+- hash: md5
+  path: gs://bluebikes-demand-predictor-data/processed/reports/bias_report.json
+outs:
+- hash: md5
+  path: bias_report.json

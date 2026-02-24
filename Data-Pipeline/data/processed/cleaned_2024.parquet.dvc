@@ -1,0 +1,8 @@
+frozen: true
+deps:
+- hash: md5
+  path: 
+    gs://bluebikes-demand-predictor-data/processed/cleaned/year=2024/cleaned.parquet
+outs:
+- hash: md5
+  path: cleaned_2024.parquet

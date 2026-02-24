@@ -1,0 +1,8 @@
+frozen: true
+deps:
+- hash: md5
+  path: 
+    gs://bluebikes-demand-predictor-data/processed/features/feature_matrix.parquet
+outs:
+- hash: md5
+  path: feature_matrix.parquet
