@@ -37,7 +37,6 @@ git clone https://github.com/tengli-alaska/BlueForecast--Predictive-Operations-P
 cd BlueForecast--Predictive-Operations-Platform-for-Bluebikes/Data-Pipeline
 python3 -m venv venv
 source venv/bin/activate
-cd Data-Pipeline
 pip3 install -r requirements.txt
 ```
 
