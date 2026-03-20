@@ -31,8 +31,6 @@ import logging
 from datetime import datetime, timezone
 
 import holidays
-import mlflow
-import mlflow.xgboost
 import numpy as np
 import pandas as pd
 from google.cloud import storage
@@ -66,7 +64,8 @@ def load_champion_model() -> tuple:
     run_id      : str  — MLflow run ID (for metadata logging)
     """
     import xgboost as xgb
-    import tempfile, os
+    import tempfile
+    import os
     from google.cloud import storage
 
     client      = MlflowClient()

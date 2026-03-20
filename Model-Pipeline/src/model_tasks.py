@@ -266,7 +266,8 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
 
         _setup_mlflow()
         import xgboost as xgb
-        import tempfile, os
+        import tempfile
+        import os
         # Look up model UUID from run_id by scanning MLmodel files in GCS
         gcs_client = storage.Client()
         bucket = gcs_client.bucket(BUCKET)
