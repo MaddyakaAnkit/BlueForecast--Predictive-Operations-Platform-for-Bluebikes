@@ -12,7 +12,6 @@ Run: pytest Model-Pipeline/tests/test_model_pipeline.py -v
 # Mock google.cloud before any module imports to avoid needing credentials
 import sys
 from unittest.mock import MagicMock
-sys.modules['google'] = MagicMock()
 sys.modules['google.cloud'] = MagicMock()
 sys.modules['google.cloud.storage'] = MagicMock()
 
