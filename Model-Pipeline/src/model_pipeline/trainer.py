@@ -118,9 +118,10 @@ class XGBoostForecaster(BaseForecaster):
         self,
         X_train: np.ndarray,
         y_train: np.ndarray,
-        X_val:   np.ndarray,
-        y_val:   np.ndarray,
-        params:  dict[str, Any],
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        params: dict[str, Any],
+        sample_weight: np.ndarray | None = None,  # <-- ADD THIS LINE
     ) -> "XGBoostForecaster":
         # In XGBoost >=2.0 early_stopping_rounds moved to the constructor.
         early_stopping_rounds = params.get("early_stopping_rounds", 20)
@@ -239,10 +240,11 @@ def run_training_pipeline(
     y_train,
     X_val,
     y_val,
-    feature_cols:         list[str],
+    feature_cols: list[str],
     dataset_version_hash: str,
-    params:               dict[str, Any] | None = None,
-    forecaster_class:     type[BaseForecaster]  = XGBoostForecaster,
+    params: dict[str, Any] | None = None,
+    forecaster_class: type[BaseForecaster] = XGBoostForecaster,
+    sample_weight: np.ndarray | None = None,  
 ) -> tuple[BaseForecaster, str]:
     """
     Full training pipeline: train → evaluate → log to MLflow → select best model.
