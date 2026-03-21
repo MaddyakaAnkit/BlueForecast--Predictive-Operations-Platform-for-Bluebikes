@@ -132,7 +132,9 @@ class XGBoostForecaster(BaseForecaster):
             early_stopping_rounds=early_stopping_rounds,
         )
         self._model.fit(
-            X_train, y_train,
+            X_train,
+            y_train,
+            sample_weight=sample_weight,
             eval_set=[(X_val, y_val)],
             verbose=50,  # print every 50 rounds
         )
@@ -296,7 +298,7 @@ def run_training_pipeline(
         # --- Train ---
         logger.info("Training %s on %s rows...", forecaster.model_type,
                     f"{len(X_train_arr):,}")
-        forecaster.train(X_train_arr, y_train_arr, X_val_arr, y_val_arr, params)
+        forecaster.train(X_train_arr, y_train_arr, X_val_arr, y_val_arr, params, sample_weight=sample_weight)
         logger.info("Training complete. Best iteration: %d", forecaster.best_iteration)
         mlflow.log_metric("best_iteration", forecaster.best_iteration)
 
