@@ -23,6 +23,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG:         "true"
     # MLflow tracking URI points to the mlflow service
     MLFLOW_TRACKING_URI:                       http://mlflow:5000
+    # Slack failure alerts — set webhook URL to enable (leave commented to disable)
+    # SLACK_WEBHOOK_URL: ""
     # GCP
     GOOGLE_APPLICATION_CREDENTIALS:           /home/airflow/.config/gcloud/application_default_credentials.json
     GOOGLE_CLOUD_PROJECT:                      bluebikes-demand-predictor

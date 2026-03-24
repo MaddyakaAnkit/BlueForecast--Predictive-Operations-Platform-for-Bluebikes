@@ -16,7 +16,7 @@ import traceback
 from datetime import datetime, timezone
 
 import mlflow
-import mlflow.xgboost
+import numpy as np
 from google.cloud import storage
 
 logger = logging.getLogger("model_pipeline.tasks")
@@ -33,10 +33,7 @@ TASK_ORDER = [
     "register_and_predict",
 ]
 
-
-# ---------------------------------------------------------------------------
 # Observability helpers
-# ---------------------------------------------------------------------------
 
 def _update_pipeline_status(
     dag_run_id: str,
@@ -127,9 +124,7 @@ def _dag_run_id(context: dict) -> str:
     return str(context.get("dag_run").run_id if context.get("dag_run") else "local")
 
 
-# ---------------------------------------------------------------------------
 # Task 1 — Validate incoming feature matrix
-# ---------------------------------------------------------------------------
 
 def task_validate_data_input(**context) -> dict:
     dag_run_id = _dag_run_id(context)
@@ -158,9 +153,7 @@ def task_validate_data_input(**context) -> dict:
         raise
 
 
-# ---------------------------------------------------------------------------
 # Task 2 — Train model + hold-out evaluation (+ optional Optuna HPO)
-# ---------------------------------------------------------------------------
 
 def task_train_and_evaluate(**context) -> dict:
     dag_run_id   = _dag_run_id(context)
@@ -225,10 +218,7 @@ def task_train_and_evaluate(**context) -> dict:
         logger.error("task_train_and_evaluate failed: %s", exc)
         raise
 
-
-# ---------------------------------------------------------------------------
 # Task 3 — Bias detection + sensitivity + visualizations
-# ---------------------------------------------------------------------------
 
 def task_detect_bias_and_sensitivity(**context) -> dict:
     dag_run_id   = _dag_run_id(context)
@@ -246,6 +236,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
 
         dag_conf              = (context.get("dag_run").conf or {}) if context.get("dag_run") else {}
         skip_hyperparam_sweep = dag_conf.get("skip_hyperparam_sweep", True)
+        run_bayesian_search   = dag_conf.get("run_bayesian_search",   False)
 
         _setup_mlflow()
         import xgboost as xgb
@@ -283,7 +274,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         X_val,   y_val   = get_X_y(val_df)
         X_test,  y_test  = get_X_y(test_df)
 
-        # --- Bias detection ---
+        # Bias detection
         bias_report = detect_model_bias(
             forecaster=forecaster,
             X_test=X_test, y_test=y_test,
@@ -292,7 +283,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         )
         bias_status = bias_report["bias_status"]
 
-        # --- Sensitivity analysis ---
+        # Sensitivity analysis
         sensitivity_report = run_sensitivity_analysis(
             forecaster=forecaster,
             X_train=X_train, y_train=y_train,
@@ -303,12 +294,12 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
             dataset_version_hash=dataset_hash,
             base_params=DEFAULT_PARAMS,
             skip_hyperparam_sweep=skip_hyperparam_sweep,
+            run_bayesian_search=run_bayesian_search,
         )
 
-        # --- Generate result visualizations ---
+        # Generate result visualizations
         shap_importance = sensitivity_report.get("feature_importance", {}).get("shap_mean_abs")
         gain_importance = sensitivity_report.get("feature_importance", {}).get("xgboost_gain")
-
         generate_all_plots(
             forecaster=forecaster,
             X_test=X_test, y_test=y_test,
@@ -318,6 +309,57 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
             gain_importance=gain_importance,
             bias_report=bias_report,
         )
+
+        # Drift detection (informational — reference=train/val, current=test)
+        drift_status = "UNKNOWN"
+        try:
+            from model_pipeline.drift_detector import run_drift_detection_pipeline
+
+            sample_size = min(10_000, len(X_train), len(X_test))
+            rng = np.random.default_rng(42)
+            ref_idx = rng.choice(len(X_train), size=sample_size, replace=False)
+            cur_idx = rng.choice(len(X_test),  size=sample_size, replace=False)
+
+            # Val errors = historical baseline; test errors = current window
+            ref_errors = np.abs(
+                y_val.values[:sample_size] - forecaster.predict(X_val.values[:sample_size])
+            )
+            cur_errors = np.abs(
+                y_test.iloc[cur_idx].values - forecaster.predict(X_test.iloc[cur_idx].values)
+            )
+
+            drift_report = run_drift_detection_pipeline(
+                reference_features=X_train.iloc[ref_idx],
+                reference_target=y_train.iloc[ref_idx].values,
+                reference_errors=ref_errors,
+                current_features=X_test.iloc[cur_idx],
+                current_target=y_test.iloc[cur_idx].values,
+                current_errors=cur_errors,
+            )
+            drift_status = "ALERT" if drift_report["overall_drift_detected"] else "STABLE"
+
+            # Write drift_report.json to GCS
+            drift_gcs_path = f"processed/models/{run_id}/drift_report.json"
+            storage.Client().bucket(BUCKET).blob(drift_gcs_path).upload_from_string(
+                json.dumps(drift_report, indent=2, default=str),
+                content_type="application/json",
+            )
+
+            # Tag MLflow run with drift summary
+            _client = mlflow.tracking.MlflowClient()
+            _client.set_tag(run_id, "drift_status", drift_status)
+            _client.set_tag(run_id, "drift_report_gcs", f"gs://{BUCKET}/{drift_gcs_path}")
+            _client.set_tag(run_id, "feature_drift_detected",
+                            str(drift_report["feature_drift"]["drift_detected"]))
+            _client.set_tag(run_id, "performance_drift_detected",
+                            str(drift_report["performance_drift"]["drift_detected"]))
+            _client.set_tag(run_id, "target_drift_detected",
+                            str(drift_report["target_drift"]["drift_detected"]))
+            logger.info("Drift detection complete. drift_status=%s", drift_status)
+
+        except Exception as drift_exc:
+            # Drift detection is informational — never crash the pipeline
+            logger.warning("Drift detection failed (non-fatal): %s", drift_exc)
 
         context["ti"].xcom_push(key="bias_status", value=bias_status)
         _update_pipeline_status(
@@ -333,10 +375,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         logger.error("task_detect_bias_and_sensitivity failed: %s", exc)
         raise
 
-
-# ---------------------------------------------------------------------------
 # Task 4 — Registry push + prediction output
-# ---------------------------------------------------------------------------
 
 def task_register_and_predict(**context) -> dict:
     dag_run_id   = _dag_run_id(context)
