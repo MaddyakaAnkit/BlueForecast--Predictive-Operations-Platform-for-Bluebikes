@@ -386,7 +386,7 @@ def run_sensitivity_analysis(
     -------
     sensitivity_report : dict with all analysis results and GCS URIs
     """
-    from model_pipeline.visualizer import (
+    from model_pipeline.visualizations import (
         log_feature_importance_chart,
         log_version_comparison_chart,
         log_sensitivity_curves,

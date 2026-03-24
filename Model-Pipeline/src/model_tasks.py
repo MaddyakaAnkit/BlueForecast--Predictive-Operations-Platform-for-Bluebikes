@@ -16,7 +16,6 @@ import traceback
 from datetime import datetime, timezone
 
 import mlflow
-import mlflow.xgboost
 import numpy as np
 from google.cloud import storage
 
@@ -34,10 +33,7 @@ TASK_ORDER = [
     "register_and_predict",
 ]
 
-
-# ---------------------------------------------------------------------------
 # Observability helpers
-# ---------------------------------------------------------------------------
 
 def _update_pipeline_status(
     dag_run_id: str,
@@ -128,9 +124,7 @@ def _dag_run_id(context: dict) -> str:
     return str(context.get("dag_run").run_id if context.get("dag_run") else "local")
 
 
-# ---------------------------------------------------------------------------
 # Task 1 — Validate incoming feature matrix
-# ---------------------------------------------------------------------------
 
 def task_validate_data_input(**context) -> dict:
     dag_run_id = _dag_run_id(context)
@@ -159,9 +153,7 @@ def task_validate_data_input(**context) -> dict:
         raise
 
 
-# ---------------------------------------------------------------------------
 # Task 2 — Train model + hold-out evaluation (+ optional Optuna HPO)
-# ---------------------------------------------------------------------------
 
 def task_train_and_evaluate(**context) -> dict:
     dag_run_id   = _dag_run_id(context)
@@ -226,10 +218,7 @@ def task_train_and_evaluate(**context) -> dict:
         logger.error("task_train_and_evaluate failed: %s", exc)
         raise
 
-
-# ---------------------------------------------------------------------------
 # Task 3 — Bias detection + sensitivity + visualizations
-# ---------------------------------------------------------------------------
 
 def task_detect_bias_and_sensitivity(**context) -> dict:
     dag_run_id   = _dag_run_id(context)
@@ -285,7 +274,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         X_val,   y_val   = get_X_y(val_df)
         X_test,  y_test  = get_X_y(test_df)
 
-        # --- Bias detection ---
+        # Bias detection
         bias_report = detect_model_bias(
             forecaster=forecaster,
             X_test=X_test, y_test=y_test,
@@ -294,7 +283,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         )
         bias_status = bias_report["bias_status"]
 
-        # --- Sensitivity analysis ---
+        # Sensitivity analysis
         sensitivity_report = run_sensitivity_analysis(
             forecaster=forecaster,
             X_train=X_train, y_train=y_train,
@@ -308,7 +297,20 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
             run_bayesian_search=run_bayesian_search,
         )
 
-        # ── Drift detection (informational — reference=train/val, current=test) ──
+        # Generate result visualizations
+        shap_importance = sensitivity_report.get("feature_importance", {}).get("shap_mean_abs")
+        gain_importance = sensitivity_report.get("feature_importance", {}).get("xgboost_gain")
+        generate_all_plots(
+            forecaster=forecaster,
+            X_test=X_test, y_test=y_test,
+            feature_cols=FEATURE_COLS,
+            run_id=run_id,
+            shap_importance=shap_importance,
+            gain_importance=gain_importance,
+            bias_report=bias_report,
+        )
+
+        # Drift detection (informational — reference=train/val, current=test)
         drift_status = "UNKNOWN"
         try:
             from model_pipeline.drift_detector import run_drift_detection_pipeline
@@ -358,24 +360,22 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         except Exception as drift_exc:
             # Drift detection is informational — never crash the pipeline
             logger.warning("Drift detection failed (non-fatal): %s", drift_exc)
-        # --- Generate result visualizations ---
-        shap_importance = sensitivity_report.get("feature_importance", {}).get("shap_mean_abs")
-        gain_importance = sensitivity_report.get("feature_importance", {}).get("xgboost_gain")
 
-        generate_all_plots(
-            forecaster=forecaster,
-            X_test=X_test, y_test=y_test,
-            feature_cols=FEATURE_COLS,
-            run_id=run_id,
-            shap_importance=shap_importance,
-            gain_importance=gain_importance,
-            bias_report=bias_report,
+        context["ti"].xcom_push(key="bias_status", value=bias_status)
+        _update_pipeline_status(
+            dag_run_id, "detect_bias_and_sensitivity", "success",
+            run_id=run_id, bias_status=bias_status,
         )
+        logger.info("Bias + sensitivity + visualizations complete. bias_status=%s", bias_status)
+        return {"bias_status": bias_status}
 
+    except Exception as exc:
+        _write_crash_log("detect_bias_and_sensitivity", dag_run_id, exc, context, run_id=run_id)
+        _update_pipeline_status(dag_run_id, "detect_bias_and_sensitivity", "failed", run_id=run_id)
+        logger.error("task_detect_bias_and_sensitivity failed: %s", exc)
+        raise
 
-# ---------------------------------------------------------------------------
 # Task 4 — Registry push + prediction output
-# ---------------------------------------------------------------------------
 
 def task_register_and_predict(**context) -> dict:
     dag_run_id   = _dag_run_id(context)

@@ -8,6 +8,11 @@ Generates plots required by submission guidelines (Section 4):
   4. Bias disparity bar chart across slice dimensions
   5. SHAP summary beeswarm plot
 
+Also logs MLflow charts directly into the run's Artifacts tab (charts/):
+  6. feature_importance.png  — top-15 features by SHAP mean |SHAP|
+  7. version_comparison.png  — val_rmse vs test_rmse across last N approved runs
+  8. sensitivity_curves.png  — OAT sweep: val RMSE vs param value per param
+
 All plots saved as PNG to GCS + logged as MLflow artifacts.
 """
 
@@ -19,9 +24,11 @@ import tempfile
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import shap
+import mlflow.tracking
 from google.cloud import storage
 
 logger = logging.getLogger("model_pipeline.visualizations")
@@ -29,20 +36,27 @@ logger.setLevel(logging.INFO)
 
 BUCKET = "bluebikes-demand-predictor-data"
 
+# Brand palette
+_BLUE  = "#0072CE"
+_GRAY  = "#6C757D"
+_RED   = "#DC3545"
+_GREEN = "#28A745"
+
 plt.rcParams.update({
     "figure.facecolor": "white",
-    "axes.facecolor": "white",
-    "axes.grid": True,
-    "grid.alpha": 0.3,
-    "font.size": 11,
+    "axes.facecolor":   "white",
+    "axes.grid":        True,
+    "grid.alpha":       0.3,
+    "font.size":        11,
 })
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 def _save_plot_to_gcs(fig: plt.Figure, run_id: str, filename: str) -> str:
+    """Save a matplotlib figure as PNG to GCS and return the GCS URI."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -55,17 +69,29 @@ def _save_plot_to_gcs(fig: plt.Figure, run_id: str, filename: str) -> str:
     return uri
 
 
-def _log_plot_as_mlflow_artifact(fig: plt.Figure, run_id: str, filename: str) -> None:
-    import mlflow.tracking
+def _log_plot_as_mlflow_artifact(fig: plt.Figure, run_id: str, filename: str,
+                                  artifact_path: str = "plots") -> None:
+    """Log a matplotlib figure as an MLflow artifact."""
     client = mlflow.tracking.MlflowClient()
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, filename)
         fig.savefig(path, format="png", dpi=150, bbox_inches="tight")
-        client.log_artifact(run_id, path, artifact_path="plots")
+        client.log_artifact(run_id, path, artifact_path=artifact_path)
+
+
+def _log_figure_to_mlflow_charts(client: mlflow.tracking.MlflowClient,
+                                   run_id: str, fig, filename: str) -> None:
+    """Save fig to a temp file and log it to MLflow artifacts under charts/."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, filename)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        client.log_artifact(run_id, path, artifact_path="charts")
+    plt.close(fig)
+    logger.info("Logged charts/%s to MLflow run %s", filename, run_id[:8])
 
 
 def _log_uris_to_mlflow(run_id: str, plot_uris: dict[str, str]) -> None:
-    import mlflow.tracking
+    """Tag the MLflow run with GCS URIs for each plot."""
     client = mlflow.tracking.MlflowClient()
     for tag_key, uri in plot_uris.items():
         client.set_tag(run_id, f"plot_{tag_key}", uri)
@@ -73,7 +99,7 @@ def _log_uris_to_mlflow(run_id: str, plot_uris: dict[str, str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 1. Feature Importance
+# 1. Feature Importance (GCS + MLflow plots/)
 # ---------------------------------------------------------------------------
 
 def plot_feature_importance(
@@ -109,7 +135,7 @@ def plot_feature_importance(
 
 
 # ---------------------------------------------------------------------------
-# 2. Predicted vs Actual
+# 2. Predicted vs Actual (GCS + MLflow plots/)
 # ---------------------------------------------------------------------------
 
 def plot_predicted_vs_actual(
@@ -131,7 +157,7 @@ def plot_predicted_vs_actual(
     ax.plot([0, max_val], [0, max_val], "r--", linewidth=1.5, label="Perfect prediction")
 
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    r2 = float(r2_score(y_true, y_pred))
+    r2   = float(r2_score(y_true, y_pred))
     ax.text(0.05, 0.92, f"RMSE: {rmse:.4f}\nR²: {r2:.4f}",
             transform=ax.transAxes, fontsize=12, verticalalignment="top",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.8))
@@ -147,7 +173,7 @@ def plot_predicted_vs_actual(
 
 
 # ---------------------------------------------------------------------------
-# 3. Residual Distribution
+# 3. Residual Distribution (GCS + MLflow plots/)
 # ---------------------------------------------------------------------------
 
 def plot_residual_distribution(
@@ -178,7 +204,7 @@ def plot_residual_distribution(
 
 
 # ---------------------------------------------------------------------------
-# 4. Bias Disparity
+# 4. Bias Disparity (GCS + MLflow plots/)
 # ---------------------------------------------------------------------------
 
 def plot_bias_disparity(bias_report: dict, run_id: str) -> str:
@@ -194,7 +220,7 @@ def plot_bias_disparity(bias_report: dict, run_id: str) -> str:
 
     fig, ax = plt.subplots(figsize=(10, 6))
     colors = ["#F44336" if r >= 3.0 else "#FF9800" if r >= 2.5 else "#4CAF50" for r in ratios]
-    bars = ax.bar(dimensions, ratios, color=colors, alpha=0.85, edgecolor="white", linewidth=1.2)
+    bars   = ax.bar(dimensions, ratios, color=colors, alpha=0.85, edgecolor="white", linewidth=1.2)
 
     ax.axhline(y=3.0, color="red", linestyle="--", linewidth=2, label="Block threshold (3.0×)")
 
@@ -215,15 +241,15 @@ def plot_bias_disparity(bias_report: dict, run_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 5. SHAP Summary Beeswarm
+# 5. SHAP Summary Beeswarm (GCS + MLflow plots/)
 # ---------------------------------------------------------------------------
 
 def plot_shap_summary(
     forecaster, X_test: pd.DataFrame, feature_cols: list[str],
     run_id: str, n_sample: int = 5_000,
 ) -> str:
-    sample = X_test.sample(n=min(n_sample, len(X_test)), random_state=42)
-    explainer = shap.TreeExplainer(forecaster._model)
+    sample      = X_test.sample(n=min(n_sample, len(X_test)), random_state=42)
+    explainer   = shap.TreeExplainer(forecaster._model)
     shap_values = explainer.shap_values(sample.values)
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -238,20 +264,193 @@ def plot_shap_summary(
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# 6. Feature Importance Chart (MLflow charts/)
+# ---------------------------------------------------------------------------
+
+def log_feature_importance_chart(
+    run_id: str,
+    feature_importance: dict,
+    top_n: int = 15,
+) -> None:
+    """
+    Horizontal bar chart of top-N features by SHAP mean |SHAP| value.
+    Logged to MLflow artifacts under charts/.
+    """
+    shap_scores = feature_importance.get("shap_mean_abs", {})
+    if not shap_scores:
+        logger.warning("No SHAP scores available — skipping feature importance chart.")
+        return
+
+    items      = list(shap_scores.items())[:top_n]
+    features   = [f for f, _ in reversed(items)]
+    values     = [v for _, v in reversed(items)]
+    bar_colors = [_RED if i == len(items) - 1 else _BLUE for i in range(len(items))]
+
+    fig, ax = plt.subplots(figsize=(10, max(5, top_n * 0.45)))
+    bars = ax.barh(features, values, color=list(reversed(bar_colors)), height=0.65)
+    ax.bar_label(bars, labels=[f"{v:.4f}" for v in values], padding=4, fontsize=8)
+    ax.set_xlabel("Mean |SHAP value|  (average impact on model output)", fontsize=10)
+    ax.set_title(
+        f"Feature Importance — SHAP (TreeExplainer, 10k-row sample)\n"
+        f"Run: {run_id[:8]}...",
+        fontsize=11,
+    )
+    ax.axvline(x=0, color="black", linewidth=0.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+
+    _log_figure_to_mlflow_charts(mlflow.tracking.MlflowClient(), run_id, fig, "feature_importance.png")
+
+
+# ---------------------------------------------------------------------------
+# 7. Version Comparison Chart (MLflow charts/)
+# ---------------------------------------------------------------------------
+
+def log_version_comparison_chart(
+    run_id: str,
+    client: mlflow.tracking.MlflowClient,
+    experiment_name: str = "BlueForecast-Demand",
+    last_n: int = 10,
+) -> None:
+    """
+    Grouped bar chart: val_rmse vs test_rmse across last N approved runs.
+    Current run is highlighted with a red border.
+    Logged to MLflow artifacts under charts/.
+    """
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        logger.warning("Experiment '%s' not found — skipping version comparison chart.", experiment_name)
+        return
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string="tags.status = 'approved'",
+        order_by=["attributes.start_time DESC"],
+        max_results=last_n,
+    )
+    if not runs:
+        logger.info("No approved runs found — skipping version comparison chart.")
+        return
+
+    runs       = list(reversed(runs))
+    labels     = [r.info.run_id[:8] for r in runs]
+    val_rmses  = [r.data.metrics.get("val_rmse",  0.0) for r in runs]
+    test_rmses = [r.data.metrics.get("test_rmse", 0.0) for r in runs]
+
+    x     = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 1.5), 5))
+    bars1 = ax.bar(x - width / 2, val_rmses,  width, label="Val RMSE",  color=_BLUE, alpha=0.88)
+    bars2 = ax.bar(x + width / 2, test_rmses, width, label="Test RMSE", color=_GRAY, alpha=0.88)
+
+    current_short = run_id[:8]
+    if current_short in labels:
+        idx = labels.index(current_short)
+        ax.axvspan(idx - 0.5, idx + 0.5, alpha=0.07, color=_RED)
+        for bar in [bars1[idx], bars2[idx]]:
+            bar.set_edgecolor(_RED)
+            bar.set_linewidth(2.0)
+
+    ax.bar_label(bars1, labels=[f"{v:.3f}" for v in val_rmses],  padding=2, fontsize=7)
+    ax.bar_label(bars2, labels=[f"{v:.3f}" for v in test_rmses], padding=2, fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel("RMSE", fontsize=10)
+    ax.set_xlabel("Run ID (short)  — current run outlined in red", fontsize=9)
+    ax.set_title(
+        "Model Version Comparison — All Approved Runs\n"
+        "Selection criterion: lowest val_rmse → promoted to champion",
+        fontsize=11,
+    )
+    ax.legend(fontsize=9)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+
+    _log_figure_to_mlflow_charts(client, run_id, fig, "version_comparison.png")
+
+
+# ---------------------------------------------------------------------------
+# 8. Hyperparameter Sensitivity Curves (MLflow charts/)
+# ---------------------------------------------------------------------------
+
+def log_sensitivity_curves(
+    run_id: str,
+    hyperparam_data: dict,
+) -> None:
+    """
+    One subplot per hyperparameter: x = param value, y = val RMSE.
+    Base value marked with a red dashed line. Best value marked with a green dot.
+    Logged to MLflow artifacts under charts/.
+    """
+    if hyperparam_data.get("skipped"):
+        logger.info("Hyperparam sweep was skipped — no sensitivity curves to plot.")
+        return
+
+    parameters = hyperparam_data.get("parameters", {})
+    if not parameters:
+        logger.info("No parameter data found — skipping sensitivity curves.")
+        return
+
+    n_params = len(parameters)
+    fig, axes = plt.subplots(1, n_params, figsize=(5 * n_params, 4), sharey=False)
+    if n_params == 1:
+        axes = [axes]
+
+    for ax, (param_name, data) in zip(axes, parameters.items()):
+        values   = data["values"]
+        val_rmse = data["val_rmse"]
+        base_val = data["base_value"]
+        best_idx = val_rmse.index(min(val_rmse))
+
+        ax.plot(values, val_rmse, marker="o", color=_BLUE,
+                linewidth=2, markersize=6, zorder=2)
+        ax.axvline(x=base_val, color=_RED, linestyle="--", linewidth=1.4,
+                   label=f"current base={base_val}")
+        ax.scatter(
+            [values[best_idx]], [val_rmse[best_idx]],
+            color=_GREEN, zorder=5, s=90,
+            label=f"best={values[best_idx]} (RMSE={val_rmse[best_idx]:.4f})",
+        )
+        ax.axvspan(
+            values[max(0, best_idx - 1)],
+            values[min(len(values) - 1, best_idx + 1)],
+            alpha=0.07, color=_GREEN,
+        )
+        ax.set_xlabel(param_name, fontsize=10)
+        ax.set_ylabel("Val RMSE", fontsize=10)
+        ax.set_title(f"{param_name}\n(OAT sweep, 20% subsample)", fontsize=9)
+        ax.legend(fontsize=7.5, loc="best")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%g"))
+
+    fig.suptitle(
+        f"Hyperparameter Sensitivity — One-at-a-Time Sweep\nRun: {run_id[:8]}...",
+        fontsize=11,
+    )
+    plt.tight_layout()
+
+    _log_figure_to_mlflow_charts(mlflow.tracking.MlflowClient(), run_id, fig, "sensitivity_curves.png")
+
+
+# ---------------------------------------------------------------------------
+# Public API — generate all plots
 # ---------------------------------------------------------------------------
 
 def generate_all_plots(
     forecaster,
-    X_test: pd.DataFrame,
+    X_test:          pd.DataFrame,
     y_test,
-    feature_cols: list[str],
-    run_id: str,
+    feature_cols:    list[str],
+    run_id:          str,
     shap_importance: dict[str, float] | None = None,
     gain_importance: dict[str, float] | None = None,
-    bias_report: dict | None = None,
+    bias_report:     dict | None = None,
 ) -> dict[str, str]:
-    """Generate all submission-required visualizations. Returns {name: gcs_uri}."""
+    """
+    Generate all submission-required visualizations and save to GCS + MLflow.
+    Returns {name: gcs_uri}.
+    """
     logger.info("=== Generating Result Visualizations ===")
     plot_uris = {}
 
