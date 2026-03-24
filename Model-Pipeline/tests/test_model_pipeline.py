@@ -4,7 +4,8 @@ Unit tests for the BlueForecast model pipeline.
 All GCS and MLflow calls are mocked — no credentials or network required.
 Tests cover the logic layer of each module: schema validation, temporal split,
 slice labelling, disparity ratio, rollback gate, evaluation thresholds,
-metric computation, and prediction output safety.
+metric computation, prediction output safety, Optuna HPO, visualizations,
+and drift detection.
 
 Run: pytest Model-Pipeline/tests/test_model_pipeline.py -v
 """
@@ -252,3 +253,159 @@ def test_prediction_no_negatives():
     assert (clipped >= 0).all()
     assert clipped[0] == 0.0
     assert clipped[2] == 1.3
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NEW TESTS — Optuna HPO, Visualizations, Drift Detection
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Optuna Hyperparameter Tuner ───────────────────────────────────────────────
+
+class TestHyperparamTuner:
+
+    def test_optuna_returns_valid_params(self):
+        """Optuna search returns dict with all expected tuned + fixed keys."""
+        from model_pipeline.hyperparam_tuner import run_optuna_search
+
+        rng = np.random.default_rng(42)
+        n = 500
+        X = pd.DataFrame(rng.standard_normal((n, 5)), columns=[f"f{i}" for i in range(5)])
+        y = pd.Series(rng.standard_normal(n))
+
+        best = run_optuna_search(X, y, X, y, n_trials=3, sample_frac=1.0)
+
+        expected_tuned = {"n_estimators", "max_depth", "learning_rate",
+                          "subsample", "colsample_bytree", "min_child_weight",
+                          "reg_alpha", "reg_lambda"}
+        assert expected_tuned.issubset(set(best.keys()))
+        # Fixed params must also be present
+        assert best["objective"] == "reg:squarederror"
+        assert best["tree_method"] == "hist"
+
+    def test_optuna_params_in_valid_ranges(self):
+        """Returned hyperparams respect search space bounds."""
+        from model_pipeline.hyperparam_tuner import run_optuna_search
+
+        rng = np.random.default_rng(42)
+        n = 300
+        X = pd.DataFrame(rng.standard_normal((n, 3)), columns=["a", "b", "c"])
+        y = pd.Series(rng.standard_normal(n))
+
+        best = run_optuna_search(X, y, X, y, n_trials=2, sample_frac=1.0)
+
+        assert 100 <= best["n_estimators"] <= 1000
+        assert 3 <= best["max_depth"] <= 10
+        assert 0.01 <= best["learning_rate"] <= 0.20
+        assert 0.6 <= best["subsample"] <= 1.0
+        assert 1 <= best["min_child_weight"] <= 10
+
+    def test_optuna_runs_with_small_subsample(self):
+        """Verify Optuna works with a tiny subsample fraction."""
+        from model_pipeline.hyperparam_tuner import run_optuna_search
+
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((1000, 3))
+        y = rng.standard_normal(1000)
+
+        best = run_optuna_search(X, y, X, y, n_trials=2, sample_frac=0.10)
+        assert "n_estimators" in best
+
+
+# ── Visualizations ────────────────────────────────────────────────────────────
+
+class TestVisualizations:
+
+    def test_predicted_vs_actual_creates_plot(self):
+        """plot_predicted_vs_actual returns a GCS URI."""
+        from model_pipeline.visualizations import plot_predicted_vs_actual
+
+        y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.3])
+
+        with patch("model_pipeline.visualizations._save_plot_to_gcs",
+                    return_value="gs://mock/pred_vs_actual.png"):
+            with patch("model_pipeline.visualizations._log_plot_as_mlflow_artifact"):
+                uri = plot_predicted_vs_actual(y_true, y_pred, "test_run_123")
+                assert uri == "gs://mock/pred_vs_actual.png"
+
+    def test_residual_distribution_creates_plot(self):
+        """plot_residual_distribution returns a GCS URI."""
+        from model_pipeline.visualizations import plot_residual_distribution
+
+        y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.3])
+
+        with patch("model_pipeline.visualizations._save_plot_to_gcs",
+                    return_value="gs://mock/residuals.png"):
+            with patch("model_pipeline.visualizations._log_plot_as_mlflow_artifact"):
+                uri = plot_residual_distribution(y_true, y_pred, "test_run_123")
+                assert uri == "gs://mock/residuals.png"
+
+    def test_bias_disparity_handles_empty_report(self):
+        """Empty dimensions dict → returns empty string, no crash."""
+        from model_pipeline.visualizations import plot_bias_disparity
+        uri = plot_bias_disparity({"dimensions": {}}, "test_run_123")
+        assert uri == ""
+
+
+# ── Drift Detection ───────────────────────────────────────────────────────────
+
+class TestDriftDetection:
+
+    def test_kl_divergence_identical_distributions(self):
+        """KL divergence of identical distributions should be near zero."""
+        from model_pipeline.drift_detector import compute_kl_divergence
+
+        rng = np.random.default_rng(42)
+        data = rng.standard_normal(5000)
+        kl = compute_kl_divergence(data, data)
+        assert kl < 0.01, f"KL divergence of identical data should be ~0, got {kl}"
+
+    def test_kl_divergence_different_distributions(self):
+        """KL divergence of shifted distributions should be > 0."""
+        from model_pipeline.drift_detector import compute_kl_divergence
+
+        rng = np.random.default_rng(42)
+        ref = rng.standard_normal(5000)
+        shifted = rng.standard_normal(5000) + 3.0  # shifted mean
+        kl = compute_kl_divergence(ref, shifted)
+        assert kl > 0.1, f"Shifted distributions should have high KL, got {kl}"
+
+    def test_performance_drift_detects_degradation(self):
+        """MAE increase > 20% should trigger drift alert."""
+        from model_pipeline.drift_detector import detect_performance_drift
+
+        baseline_errors = np.array([0.5, 0.6, 0.4, 0.5, 0.7])  # mean ~0.54
+        current_errors  = np.array([1.0, 1.2, 0.9, 1.1, 1.3])  # mean ~1.10 → +100%
+        result = detect_performance_drift(baseline_errors, current_errors, threshold_pct=20.0)
+        assert result["drift_detected"] is True
+
+    def test_performance_drift_no_alert_when_stable(self):
+        """MAE increase < 20% should not trigger drift alert."""
+        from model_pipeline.drift_detector import detect_performance_drift
+
+        baseline_errors = np.array([0.5, 0.6, 0.4, 0.5, 0.7])
+        current_errors  = np.array([0.55, 0.62, 0.45, 0.52, 0.72])  # ~5% increase
+        result = detect_performance_drift(baseline_errors, current_errors, threshold_pct=20.0)
+        assert result["drift_detected"] is False
+
+    def test_feature_drift_detects_shifted_feature(self):
+        """A shifted feature column should be flagged as drifted."""
+        from model_pipeline.drift_detector import detect_feature_drift
+
+        rng = np.random.default_rng(42)
+        ref = pd.DataFrame({"temp": rng.standard_normal(5000), "wind": rng.standard_normal(5000)})
+        cur = pd.DataFrame({"temp": rng.standard_normal(5000) + 5.0, "wind": rng.standard_normal(5000)})
+        result = detect_feature_drift(ref, cur, threshold=0.1)
+        assert result["drift_detected"] is True
+        assert "temp" in result["drifted_features"]
+
+    def test_target_drift_stable_distribution(self):
+        """Same target distribution → no drift detected."""
+        from model_pipeline.drift_detector import detect_target_drift
+
+        rng = np.random.default_rng(42)
+        data = rng.standard_normal(5000)
+        result = detect_target_drift(data, data, threshold=0.15)
+        assert result["drift_detected"] is False
