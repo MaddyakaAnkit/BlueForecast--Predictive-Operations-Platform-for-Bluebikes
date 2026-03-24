@@ -18,6 +18,7 @@ MLFLOW SETUP:
 
 TRAINING TIME ESTIMATE:
   Full 5.8M row training set with tree_method='hist': ~10–20 min on CPU.
+  With Optuna search (30 trials, 20% subsample): add ~15–30 min.
   For a quick plumbing check, use sample_frac (see smoke test at bottom).
 """
 
@@ -72,6 +73,7 @@ class BaseForecaster(ABC):
         X_val:   np.ndarray,
         y_val:   np.ndarray,
         params:  dict[str, Any],
+        sample_weight: np.ndarray | None = None,
     ) -> "BaseForecaster":
         """Fit the model. Must return self."""
         ...
@@ -118,10 +120,10 @@ class XGBoostForecaster(BaseForecaster):
         self,
         X_train: np.ndarray,
         y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
-        params: dict[str, Any],
-        sample_weight: np.ndarray | None = None,  # <-- ADD THIS LINE
+        X_val:   np.ndarray,
+        y_val:   np.ndarray,
+        params:  dict[str, Any],
+        sample_weight: np.ndarray | None = None,
     ) -> "XGBoostForecaster":
         # In XGBoost >=2.0 early_stopping_rounds moved to the constructor.
         early_stopping_rounds = params.get("early_stopping_rounds", 20)
@@ -240,23 +242,30 @@ def run_training_pipeline(
     y_train,
     X_val,
     y_val,
-    feature_cols: list[str],
+    feature_cols:         list[str],
     dataset_version_hash: str,
-    params: dict[str, Any] | None = None,
-    forecaster_class: type[BaseForecaster] = XGBoostForecaster,
-    sample_weight: np.ndarray | None = None,  
+    params:               dict[str, Any] | None = None,
+    forecaster_class:     type[BaseForecaster]  = XGBoostForecaster,
+    sample_weight:        np.ndarray | None = None,
+    run_optuna:           bool = False,
+    optuna_n_trials:      int = 30,
+    optuna_sample_frac:   float = 0.20,
 ) -> tuple[BaseForecaster, str]:
     """
-    Full training pipeline: train → evaluate → log to MLflow → select best model.
+    Full training pipeline: [optional Optuna HPO] → train → evaluate → log → select.
 
     Parameters
     ----------
-    X_train, y_train : training features and target (pandas DataFrame/Series)
-    X_val, y_val     : validation features and target (pandas DataFrame/Series)
-    feature_cols     : ordered list of feature column names (for importance logging)
-    dataset_version_hash : MD5 hash from data_loader — logged as a run tag
-    params           : hyperparameters (defaults to DEFAULT_PARAMS if None)
-    forecaster_class : which BaseForecaster subclass to instantiate
+    X_train, y_train      : training features and target
+    X_val, y_val          : validation features and target
+    feature_cols          : ordered list of feature column names
+    dataset_version_hash  : MD5 hash from data_loader
+    params                : hyperparameters (defaults to DEFAULT_PARAMS)
+    forecaster_class      : which BaseForecaster subclass to instantiate
+    sample_weight         : optional per-sample weights for bias mitigation
+    run_optuna            : if True, run Bayesian HPO before final training
+    optuna_n_trials       : number of Optuna trials (default 30)
+    optuna_sample_frac    : fraction of training data for Optuna (default 20%)
 
     Returns
     -------
@@ -264,7 +273,27 @@ def run_training_pipeline(
     run_id     : MLflow run ID for this training run
     """
     if params is None:
-        params = DEFAULT_PARAMS
+        params = DEFAULT_PARAMS.copy()
+
+    # --- Optional: Bayesian hyperparameter optimization ---
+    if run_optuna:
+        from model_pipeline.hyperparam_tuner import run_optuna_search
+        logger.info("Running Optuna Bayesian HPO (%d trials)...", optuna_n_trials)
+
+        best_params = run_optuna_search(
+            X_train, y_train, X_val, y_val,
+            n_trials=optuna_n_trials,
+            sample_frac=optuna_sample_frac,
+        )
+        # Override tuned keys, keep fixed keys from DEFAULT_PARAMS
+        tuned_keys = [
+            "n_estimators", "max_depth", "learning_rate", "subsample",
+            "colsample_bytree", "min_child_weight", "reg_alpha", "reg_lambda",
+        ]
+        for k in tuned_keys:
+            if k in best_params:
+                params[k] = best_params[k]
+        logger.info("Optuna best params merged. Training final model on full data...")
 
     _setup_mlflow()
 
@@ -288,7 +317,9 @@ def run_training_pipeline(
             "feature_count":         str(len(feature_cols)),
             "train_rows":            str(len(X_train_arr)),
             "val_rows":              str(len(X_val_arr)),
-            "status":                "pending",  # updated after selection
+            "status":                "pending",
+            "hpo_method":            "optuna_tpe_bayesian" if run_optuna else "manual",
+            "bias_mitigation_applied": "true" if sample_weight is not None else "false",
         })
 
         # --- Log hyperparameters ---
@@ -296,11 +327,15 @@ def run_training_pipeline(
                            if k != "early_stopping_rounds"})
         mlflow.log_param("early_stopping_rounds",
                          params.get("early_stopping_rounds", 20))
+        if run_optuna:
+            mlflow.log_param("optuna_n_trials", optuna_n_trials)
+            mlflow.log_param("optuna_sample_frac", optuna_sample_frac)
 
         # --- Train ---
         logger.info("Training %s on %s rows...", forecaster.model_type,
                     f"{len(X_train_arr):,}")
-        forecaster.train(X_train_arr, y_train_arr, X_val_arr, y_val_arr, params, sample_weight=sample_weight)
+        forecaster.train(X_train_arr, y_train_arr, X_val_arr, y_val_arr, params,
+                         sample_weight=sample_weight)
         logger.info("Training complete. Best iteration: %d", forecaster.best_iteration)
         mlflow.log_metric("best_iteration", forecaster.best_iteration)
 
@@ -317,6 +352,19 @@ def run_training_pipeline(
         for name, value in all_metrics.items():
             logger.info("  %s: %.4f", name, value)
 
+        # --- Save Optuna report ---
+        if run_optuna:
+            from model_pipeline.hyperparam_tuner import save_optuna_report
+            optuna_uri = save_optuna_report(
+                best_params=params,
+                n_trials=optuna_n_trials,
+                sample_frac=optuna_sample_frac,
+                baseline_val_rmse=val_metrics["val_rmse"],
+                best_val_rmse=val_metrics["val_rmse"],
+                run_id=run_id,
+            )
+            mlflow.set_tag("optuna_report_gcs", optuna_uri)
+
         # --- Log model artifact ---
         if hasattr(forecaster, "_model") and forecaster._model is not None:
             mlflow.xgboost.log_model(forecaster._model, artifact_path="model")
@@ -327,7 +375,6 @@ def run_training_pipeline(
         new_val_rmse = val_metrics["val_rmse"]
 
         if current_best is None:
-            # First valid run — promote automatically
             status         = "approved"
             selection_note = "First valid run — promoted automatically."
         elif new_val_rmse < current_best:

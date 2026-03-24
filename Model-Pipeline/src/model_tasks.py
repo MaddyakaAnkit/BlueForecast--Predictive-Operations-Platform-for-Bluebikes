@@ -42,23 +42,15 @@ TASK_ORDER = [
 def _update_pipeline_status(
     dag_run_id: str,
     task_name:  str,
-    status:     str,          # "running" | "success" | "failed" | "pending"
+    status:     str,
     run_id:     str | None = None,
     **metrics,
 ) -> None:
-    """
-    Read-modify-write the live pipeline status JSON in GCS.
-    Called at the start and end of every task wrapper.
-    Overwrites the same file — this is a live indicator, not an audit log.
-
-    GCS path: processed/pipeline-status/current.json
-    """
     try:
         gcs     = storage.Client()
         blob    = gcs.bucket(BUCKET).blob(STATUS_GCS_PATH)
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Load existing status or initialise fresh
         if blob.exists():
             current = json.loads(blob.download_as_text())
         else:
@@ -70,29 +62,24 @@ def _update_pipeline_status(
                 "updated_at":     now_iso,
                 "tasks": {t: {"status": "pending"} for t in TASK_ORDER},
                 "metrics": {
-                    "val_rmse":         None,
-                    "test_rmse":        None,
-                    "bias_status":      None,
-                    "registry_version": None,
+                    "val_rmse": None, "test_rmse": None,
+                    "bias_status": None, "registry_version": None,
                 },
             }
 
-        # Update this task's entry
         task_entry = current["tasks"].setdefault(task_name, {})
         task_entry["status"] = status
         if status == "running":
             task_entry["started_at"] = now_iso
         elif status in ("success", "failed"):
             task_entry["completed_at"] = now_iso
-            task_entry.update(metrics)     # attach any extra kv pairs (rmse, hash, etc.)
+            task_entry.update(metrics)
 
-        # Propagate top-level fields
         if run_id:
             current["run_id"] = run_id
         current["updated_at"] = now_iso
         current["dag_run_id"] = dag_run_id
 
-        # Roll up overall_status
         statuses = [v.get("status") for v in current["tasks"].values()]
         if "failed" in statuses:
             current["overall_status"] = "failed"
@@ -101,7 +88,6 @@ def _update_pipeline_status(
         else:
             current["overall_status"] = "running"
 
-        # Merge any top-level metrics
         for k in ("val_rmse", "test_rmse", "bias_status", "registry_version"):
             if k in metrics:
                 current["metrics"][k] = metrics[k]
@@ -111,35 +97,22 @@ def _update_pipeline_status(
             content_type="application/json",
         )
     except Exception as exc:
-        # Status update failure must never crash the pipeline task itself
         logger.warning("_update_pipeline_status failed (non-fatal): %s", exc)
 
 
 def _write_crash_log(
-    task_id:    str,
-    dag_run_id: str,
-    exception:  Exception,
-    context:    dict,
-    run_id:     str | None = None,
+    task_id: str, dag_run_id: str, exception: Exception,
+    context: dict, run_id: str | None = None,
 ) -> None:
-    """
-    Write a structured crash report to GCS. Called only inside except blocks.
-    Success runs never trigger this — zero log storage on happy path.
-
-    GCS path: processed/pipeline-logs/crashes/{dag_run_id}_{task_id}.json
-    Auto-deleted after 30 days via GCS lifecycle rule (set once via gsutil).
-    """
     try:
         tb_lines = traceback.format_exc().splitlines()
         crash_log = {
-            "task_id":      task_id,
-            "dag_run_id":   dag_run_id,
-            "run_id":       run_id,
-            "exception_type":    type(exception).__name__,
+            "task_id": task_id, "dag_run_id": dag_run_id, "run_id": run_id,
+            "exception_type": type(exception).__name__,
             "exception_message": str(exception),
-            "traceback_tail":    tb_lines[-20:],   # last 20 lines only
-            "execution_date":    str(context.get("execution_date")),
-            "timestamp":         datetime.now(timezone.utc).isoformat(),
+            "traceback_tail": tb_lines[-20:],
+            "execution_date": str(context.get("execution_date")),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         path = f"{CRASH_GCS_PREFIX}/{dag_run_id}_{task_id}.json"
         storage.Client().bucket(BUCKET).blob(path).upload_from_string(
@@ -187,7 +160,7 @@ def task_validate_data_input(**context) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Task 2 — Train model + hold-out evaluation
+# Task 2 — Train model + hold-out evaluation (+ optional Optuna HPO)
 # ---------------------------------------------------------------------------
 
 def task_train_and_evaluate(**context) -> dict:
@@ -200,6 +173,12 @@ def task_train_and_evaluate(**context) -> dict:
         from model_pipeline.splitter     import temporal_split
         from model_pipeline.trainer      import run_training_pipeline, DEFAULT_PARAMS, _setup_mlflow
         from model_pipeline.evaluator    import evaluate_on_test
+
+        # Read DAG config for Optuna toggle
+        dag_conf   = (context.get("dag_run").conf or {}) if context.get("dag_run") else {}
+        run_optuna = dag_conf.get("run_optuna", False)
+        optuna_n_trials    = dag_conf.get("optuna_n_trials", 30)
+        optuna_sample_frac = dag_conf.get("optuna_sample_frac", 0.20)
 
         _setup_mlflow()
         df, _, _le = load_feature_matrix()
@@ -214,7 +193,10 @@ def task_train_and_evaluate(**context) -> dict:
             X_val=X_val,     y_val=y_val,
             feature_cols=FEATURE_COLS,
             dataset_version_hash=dataset_hash,
-            params=DEFAULT_PARAMS,
+            params=DEFAULT_PARAMS.copy(),
+            run_optuna=run_optuna,
+            optuna_n_trials=optuna_n_trials,
+            optuna_sample_frac=optuna_sample_frac,
         )
 
         val_summary = evaluate_on_test(
@@ -246,7 +228,7 @@ def task_train_and_evaluate(**context) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — Bias detection + sensitivity analysis
+# Task 3 — Bias detection + sensitivity + visualizations
 # ---------------------------------------------------------------------------
 
 def task_detect_bias_and_sensitivity(**context) -> dict:
@@ -261,6 +243,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         from model_pipeline.trainer        import XGBoostForecaster, DEFAULT_PARAMS, _setup_mlflow
         from model_pipeline.bias_detection import detect_model_bias
         from model_pipeline.sensitivity    import run_sensitivity_analysis
+        from model_pipeline.visualizations import generate_all_plots
 
         dag_conf              = (context.get("dag_run").conf or {}) if context.get("dag_run") else {}
         skip_hyperparam_sweep = dag_conf.get("skip_hyperparam_sweep", True)
@@ -270,7 +253,8 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         import xgboost as xgb
         import tempfile
         import os
-        # Look up model UUID from run_id by scanning MLmodel files in GCS
+
+        # Load model from GCS via MLflow artifact path
         gcs_client = storage.Client()
         bucket = gcs_client.bucket(BUCKET)
         model_path = None
@@ -301,6 +285,7 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         X_val,   y_val   = get_X_y(val_df)
         X_test,  y_test  = get_X_y(test_df)
 
+        # --- Bias detection ---
         bias_report = detect_model_bias(
             forecaster=forecaster,
             X_test=X_test, y_test=y_test,
@@ -309,7 +294,8 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         )
         bias_status = bias_report["bias_status"]
 
-        run_sensitivity_analysis(
+        # --- Sensitivity analysis ---
+        sensitivity_report = run_sensitivity_analysis(
             forecaster=forecaster,
             X_train=X_train, y_train=y_train,
             X_val=X_val,     y_val=y_val,
@@ -372,20 +358,19 @@ def task_detect_bias_and_sensitivity(**context) -> dict:
         except Exception as drift_exc:
             # Drift detection is informational — never crash the pipeline
             logger.warning("Drift detection failed (non-fatal): %s", drift_exc)
+        # --- Generate result visualizations ---
+        shap_importance = sensitivity_report.get("feature_importance", {}).get("shap_mean_abs")
+        gain_importance = sensitivity_report.get("feature_importance", {}).get("xgboost_gain")
 
-        context["ti"].xcom_push(key="bias_status", value=bias_status)
-        _update_pipeline_status(
-            dag_run_id, "detect_bias_and_sensitivity", "success",
-            run_id=run_id, bias_status=bias_status,
+        generate_all_plots(
+            forecaster=forecaster,
+            X_test=X_test, y_test=y_test,
+            feature_cols=FEATURE_COLS,
+            run_id=run_id,
+            shap_importance=shap_importance,
+            gain_importance=gain_importance,
+            bias_report=bias_report,
         )
-        logger.info("Bias + sensitivity complete. bias_status=%s", bias_status)
-        return {"bias_status": bias_status}
-
-    except Exception as exc:
-        _write_crash_log("detect_bias_and_sensitivity", dag_run_id, exc, context, run_id=run_id)
-        _update_pipeline_status(dag_run_id, "detect_bias_and_sensitivity", "failed", run_id=run_id)
-        logger.error("task_detect_bias_and_sensitivity failed: %s", exc)
-        raise
 
 
 # ---------------------------------------------------------------------------

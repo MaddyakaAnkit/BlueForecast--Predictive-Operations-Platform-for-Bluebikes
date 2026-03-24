@@ -76,7 +76,8 @@ services:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 15
+      start_period: 300s
 
   # ── Airflow scheduler ─────────────────────────────────────────────────────
   airflow-scheduler:

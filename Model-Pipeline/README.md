@@ -1,4 +1,4 @@
-# BlueForecast — Model Pipeline
+# BlueForecast : Model Pipeline
 
 Hourly bike-share demand forecasting for 534 Bluebikes stations across Boston. This pipeline trains, validates, and serves an XGBoost model that predicts `demand_count` one hour ahead per station. It sits directly downstream of the Data Pipeline and feeds the ops dashboard via GCS.
 
